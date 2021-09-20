@@ -7,7 +7,7 @@ import (
 	"github.com/go-kit/kit/endpoint"
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/ratelimit"
-	"github.com/microservices-example/addsvc/addservice"
+	"github.com/maolonglong/microservices-example/pkg/addservice"
 	"golang.org/x/time/rate"
 )
 

@@ -11,17 +11,23 @@ import (
 
 	"github.com/go-kit/kit/log"
 	consulsd "github.com/go-kit/kit/sd/consul"
+	kitgrpc "github.com/go-kit/kit/transport/grpc"
 	"github.com/google/uuid"
 	"github.com/hashicorp/consul/api"
-	"github.com/microservices-example/addsvc/addendpoint"
-	"github.com/microservices-example/addsvc/addservice"
-	"github.com/microservices-example/addsvc/addtransport"
+	"github.com/maolonglong/microservices-example/pb"
+	"github.com/maolonglong/microservices-example/pkg/addendpoint"
+	"github.com/maolonglong/microservices-example/pkg/addservice"
+	"github.com/maolonglong/microservices-example/pkg/addtransport"
 	"github.com/oklog/run"
 	"github.com/spf13/cast"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
 )
 
 var (
 	httpPort = flag.Int("http_port", 8081, "HTTP listen address")
+	grpcPort = flag.Int("grpc_port", 9091, "gRPC listen address")
 )
 
 func main() {
@@ -38,6 +44,7 @@ func main() {
 		service     = addservice.New(logger)
 		endpoints   = addendpoint.New(service, logger)
 		httpHandler = addtransport.NewHTTPHandler(endpoints, logger)
+		grpcServer  = addtransport.NewGRPCServer(endpoints, logger)
 	)
 
 	var g run.Group
@@ -55,6 +62,28 @@ func main() {
 			httpListener.Close()
 		})
 	}
+	{
+		grpcAddr := ":" + cast.ToString(*grpcPort)
+		grpcListener, err := net.Listen("tcp", grpcAddr)
+		if err != nil {
+			logger.Log("transport", "gRPC", "during", "Listen", "err", err)
+			os.Exit(1)
+		}
+		g.Add(func() error {
+			logger.Log("transport", "gRPC", "addr", grpcAddr)
+			baseServer := grpc.NewServer(grpc.UnaryInterceptor(kitgrpc.Interceptor))
+			pb.RegisterAddServiceServer(baseServer, grpcServer)
+
+			healthServer := health.NewServer()
+			healthServer.SetServingStatus("addsvc", grpc_health_v1.HealthCheckResponse_SERVING)
+			grpc_health_v1.RegisterHealthServer(baseServer, healthServer)
+
+			return baseServer.Serve(grpcListener)
+		}, func(error) {
+			grpcListener.Close()
+		})
+	}
+
 	g.Add(run.SignalHandler(context.Background(), syscall.SIGINT, syscall.SIGTERM))
 
 	var client consulsd.Client
@@ -70,13 +99,22 @@ func main() {
 	registrar := consulsd.NewRegistrar(
 		client,
 		&api.AgentServiceRegistration{
-			ID:      uuid.NewString(),
-			Name:    "addsvc",
-			Port:    *httpPort,
+			ID:   uuid.NewString(),
+			Name: "addsvc",
+			// Port:    *httpPort,
+			Port:    *grpcPort,
 			Address: "localhost",
-			Check: &api.AgentServiceCheck{
-				Interval: "5s",
-				HTTP:     fmt.Sprintf("http://localhost:%d/health", *httpPort),
+			Checks: api.AgentServiceChecks{
+				{
+					Interval: "5s",
+					Timeout:  "2s",
+					HTTP:     fmt.Sprintf("http://localhost:%d/health", *httpPort),
+				},
+				{
+					Interval: "5s",
+					Timeout:  "2s",
+					GRPC:     fmt.Sprintf("localhost:%d/addsvc", *grpcPort),
+				},
 			},
 		},
 		logger,

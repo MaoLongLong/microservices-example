@@ -18,8 +18,8 @@ import (
 	"github.com/go-kit/kit/transport"
 	httptransport "github.com/go-kit/kit/transport/http"
 	"github.com/gorilla/mux"
-	"github.com/microservices-example/addsvc/addendpoint"
-	"github.com/microservices-example/addsvc/addservice"
+	"github.com/maolonglong/microservices-example/pkg/addendpoint"
+	"github.com/maolonglong/microservices-example/pkg/addservice"
 	"github.com/sony/gobreaker"
 	"golang.org/x/time/rate"
 )

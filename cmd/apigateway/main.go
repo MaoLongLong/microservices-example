@@ -1,18 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"flag"
-	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
-	"strings"
 	"syscall"
 	"time"
 
@@ -21,11 +15,14 @@ import (
 	"github.com/go-kit/kit/sd"
 	consulsd "github.com/go-kit/kit/sd/consul"
 	"github.com/go-kit/kit/sd/lb"
-	httptransport "github.com/go-kit/kit/transport/http"
 	"github.com/gorilla/mux"
 	"github.com/hashicorp/consul/api"
+	"github.com/maolonglong/microservices-example/pkg/addendpoint"
+	"github.com/maolonglong/microservices-example/pkg/addservice"
+	"github.com/maolonglong/microservices-example/pkg/addtransport"
 	"github.com/oklog/run"
 	"github.com/spf13/cast"
+	"google.golang.org/grpc"
 )
 
 var (
@@ -52,33 +49,30 @@ func main() {
 		client = consulsd.NewClient(consulClient)
 	}
 
-	ctx := context.Background()
 	r := mux.NewRouter()
 
 	var (
 		tags        = []string{}
 		passingOnly = true
-		sum         endpoint.Endpoint
-		concat      endpoint.Endpoint
+		endpoints   = addendpoint.Set{}
 		instancer   = consulsd.NewInstancer(client, logger, "addsvc", tags, passingOnly)
 	)
 	{
-		factory := addsvcFactory(ctx, "GET", "/sum")
+		factory := addsvcFactory(addendpoint.MakeSumEndpoint, logger)
 		endpointer := sd.NewEndpointer(instancer, factory, logger)
 		balancer := lb.NewRoundRobin(endpointer)
 		retry := lb.Retry(3, 500*time.Millisecond, balancer)
-		sum = retry
+		endpoints.SumEndpoint = retry
 	}
 	{
-		factory := addsvcFactory(ctx, "GET", "/concat")
+		factory := addsvcFactory(addendpoint.MakeConcatEndpoint, logger)
 		endpointer := sd.NewEndpointer(instancer, factory, logger)
 		balancer := lb.NewRoundRobin(endpointer)
 		retry := lb.Retry(3, 500*time.Millisecond, balancer)
-		concat = retry
+		endpoints.ConcatEndpoint = retry
 	}
 
-	r.Handle("/addsvc/sum", httptransport.NewServer(sum, decodeSumRequest, encodeJSONResponse))
-	r.Handle("/addsvc/concat", httptransport.NewServer(concat, decodeConcatRequest, encodeJSONResponse))
+	r.PathPrefix("/addsvc").Handler(http.StripPrefix("/addsvc", addtransport.NewHTTPHandler(endpoints, logger)))
 
 	var g run.Group
 	{
@@ -99,88 +93,14 @@ func main() {
 	logger.Log("exit", g.Run())
 }
 
-func addsvcFactory(ctx context.Context, method, path string) sd.Factory {
+func addsvcFactory(makeEndpoint func(addservice.Service) endpoint.Endpoint, logger log.Logger) sd.Factory {
 	return func(instance string) (endpoint.Endpoint, io.Closer, error) {
-		if !strings.HasPrefix(instance, "http") {
-			instance = "http://" + instance
-		}
-		tgt, err := url.Parse(instance)
+		conn, err := grpc.Dial(instance, grpc.WithInsecure())
 		if err != nil {
 			return nil, nil, err
 		}
-		tgt.Path = path
-
-		var (
-			enc httptransport.EncodeRequestFunc
-			dec httptransport.DecodeResponseFunc
-		)
-		switch path {
-		case "/sum":
-			enc, dec = encodeJSONRequest, decodeSumResponse
-		case "/concat":
-			enc, dec = encodeJSONRequest, decodeConcatResponse
-		default:
-			return nil, nil, fmt.Errorf("unknown addsvc path %q", path)
-		}
-
-		return httptransport.NewClient(method, tgt, enc, dec).Endpoint(), nil, nil
+		service := addtransport.NewGRPCClient(conn, logger)
+		endpoint := makeEndpoint(service)
+		return endpoint, conn, nil
 	}
-}
-
-func encodeJSONRequest(_ context.Context, req *http.Request, request interface{}) error {
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(request); err != nil {
-		return err
-	}
-	req.Body = ioutil.NopCloser(&buf)
-	return nil
-}
-
-func encodeJSONResponse(_ context.Context, w http.ResponseWriter, response interface{}) error {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	return json.NewEncoder(w).Encode(response)
-}
-
-func decodeSumResponse(ctx context.Context, r *http.Response) (interface{}, error) {
-	var response struct {
-		V   int    `json:"v,omitempty"`
-		Err string `json:"error,omitempty"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&response); err != nil {
-		return nil, err
-	}
-	return response, nil
-}
-
-func decodeConcatResponse(ctx context.Context, r *http.Response) (interface{}, error) {
-	var response struct {
-		V   string `json:"v,omitempty"`
-		Err string `json:"error,omitempty"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&response); err != nil {
-		return nil, err
-	}
-	return response, nil
-}
-
-func decodeSumRequest(ctx context.Context, r *http.Request) (interface{}, error) {
-	var request struct {
-		A int `json:"a"`
-		B int `json:"b"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		return nil, err
-	}
-	return request, nil
-}
-
-func decodeConcatRequest(ctx context.Context, r *http.Request) (interface{}, error) {
-	var request struct {
-		A string `json:"a"`
-		B string `json:"b"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		return nil, err
-	}
-	return request, nil
 }
